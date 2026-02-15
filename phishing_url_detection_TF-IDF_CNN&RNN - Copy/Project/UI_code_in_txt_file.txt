@@ -1,0 +1,715 @@
+# First, install required packages
+!pip install gradio --quiet
+!pip install matplotlib seaborn --quiet
+
+# Download NLTK data FIRST
+import nltk
+
+# Try to download stopwords with proper error handling
+try:
+    nltk.data.find('corpora/stopwords')
+    print("✅ NLTK stopwords already downloaded")
+except LookupError:
+    print("📥 Downloading NLTK stopwords...")
+    nltk.download('stopwords', quiet=False)
+    print("✅ NLTK stopwords downloaded")
+
+# Now import other packages
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from matplotlib import cm
+import pickle
+import tensorflow as tf
+from scipy.sparse import hstack
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+import gradio as gr
+import re
+import math
+from collections import Counter
+import os
+
+# Import NLTK components
+from nltk.tokenize import RegexpTokenizer
+from nltk.stem.snowball import SnowballStemmer
+from nltk.corpus import stopwords
+
+# ========================
+# DEFINE ENHANCEDURLFEATUREEXTRACTOR CLASS FIRST
+# ========================
+class EnhancedURLFeatureExtractor:
+    """Extract comprehensive features from URLs"""
+    
+    def __init__(self):
+        self.phishing_keywords = [
+            'login', 'signin', 'verify', 'secure', 'account', 'update',
+            'banking', 'paypal', 'confirm', 'password', 'authenticate',
+            'validation', 'security', 'webscr', 'signup', 'login-secure',
+            'bank', 'credit', 'card', 'ssn', 'social', 'irs', 'tax',
+            'update', 'verify', 'wallet', 'bitcoin', 'crypto', 'wallet'
+        ]
+        
+        self.suspicious_tlds = ['.tk', '.ml', '.ga', '.cf', '.gq', '.xyz',
+                                '.top', '.club', '.work', '.online', '.site']
+        
+        self.shortening_services = ['bit.ly', 'tinyurl', 'goo.gl', 'shorte.st',
+                                   'ow.ly', 't.co', 'is.gd', 'cli.gs', 'yfrog.com',
+                                   'migre.me', 'ff.im', 'tiny.cc', 'url4.eu',
+                                   'twit.ac', 'su.pr', 'twurl.nl', 'snipurl.com',
+                                   'short.to', 'budurl.com', 'ping.fm', 'post.ly',
+                                   'just.as', 'bkite.com', 'snipr.com', 'fic.kr',
+                                   'loopt.us', 'doiop.com', 'short.ie', 'kl.am',
+                                   'wp.me', 'rubyurl.com', 'om.ly', 'to.ly',
+                                   'bit.do', 't.co', 'lnkd.in', 'db.tt', 'qr.ae',
+                                   'adf.ly', 'goo.gl', 'bitly.com', 'cur.lv',
+                                   'tinyurl.com', 'ow.ly', 'bit.ly', 'ity.im',
+                                   'q.gs', 'is.gd', 'po.st', 'bc.vc', 'twitthis.com',
+                                   'u.to', 'j.mp', 'buzurl.com', 'cutt.us',
+                                   'u.bb', 'yourls.org', 'x.co', 'prettylinkpro.com',
+                                   'scrnch.me', 'filoops.info', 'vzturl.com',
+                                   'qr.net', '1url.com', 'tweez.me', 'v.gd',
+                                   'tr.im', 'link.zip.net']
+    
+    def extract_features(self, url):
+        features = {}
+        
+        # URL string
+        url_str = str(url).lower()
+        
+        # 1. Length-based features
+        features['url_length'] = len(url_str)
+        features['hostname_length'] = len(url_str.split('//')[-1].split('/')[0]) if '//' in url_str else len(url_str.split('/')[0])
+        features['path_length'] = len('/'.join(url_str.split('/')[3:]))
+        features['num_dots'] = url_str.count('.')
+        features['num_hyphens'] = url_str.count('-')
+        features['num_underscores'] = url_str.count('_')
+        features['num_slashes'] = url_str.count('/')
+        features['num_questionmarks'] = url_str.count('?')
+        features['num_equals'] = url_str.count('=')
+        features['num_ats'] = url_str.count('@')
+        features['num_ampersands'] = url_str.count('&')
+        features['num_percent'] = url_str.count('%')
+        
+        # 2. Protocol features
+        features['has_https'] = 1 if url_str.startswith('https://') else 0
+        features['has_http'] = 1 if url_str.startswith('http://') else 0
+        
+        # 3. Domain features
+        if '//' in url_str:
+            domain_part = url_str.split('//')[1].split('/')[0]
+        else:
+            domain_part = url_str.split('/')[0]
+        
+        features['domain_length'] = len(domain_part)
+        features['num_subdomains'] = domain_part.count('.') - 1 if '.' in domain_part else 0
+        
+        # 4. TLD features
+        tld = domain_part.split('.')[-1] if '.' in domain_part else ''
+        features['has_suspicious_tld'] = 1 if any(suspicious_tld in url_str for suspicious_tld in self.suspicious_tlds) else 0
+        features['tld_length'] = len(tld)
+        
+        # 5. URL shortening detection
+        features['is_shortened'] = 1 if any(short in domain_part for short in self.shortening_services) else 0
+        
+        # 6. Keyword features
+        keyword_count = 0
+        for keyword in self.phishing_keywords:
+            if keyword in url_str:
+                keyword_count += 1
+        
+        features['phishing_keyword_count'] = keyword_count
+        features['has_phishing_keyword'] = 1 if keyword_count > 0 else 0
+        
+        # 7. Suspicious patterns
+        features['has_ip'] = 1 if re.search(r'\d+\.\d+\.\d+\.\d+', url_str) else 0
+        features['hex_chars_ratio'] = sum(1 for c in url_str if c in '0123456789abcdef') / max(len(url_str), 1)
+        
+        # 8. Character distribution features
+        features['digit_ratio'] = sum(1 for c in url_str if c.isdigit()) / max(len(url_str), 1)
+        features['letter_ratio'] = sum(1 for c in url_str if c.isalpha()) / max(len(url_str), 1)
+        features['special_char_ratio'] = sum(1 for c in url_str if not c.isalnum() and c not in ['.', '-', '_', '/']) / max(len(url_str), 1)
+        features['vowel_ratio'] = sum(1 for c in url_str if c in 'aeiou') / max(len(url_str), 1)
+        
+        # 9. Specific pattern features
+        features['has_login'] = 1 if 'login' in url_str else 0
+        features['has_signin'] = 1 if 'signin' in url_str else 0
+        features['has_verify'] = 1 if 'verify' in url_str else 0
+        features['has_bank'] = 1 if 'bank' in url_str else 0
+        features['has_paypal'] = 1 if 'paypal' in url_str else 0
+        features['has_secure'] = 1 if 'secure' in url_str else 0
+        
+        # 10. Entropy (measure of randomness)
+        if url_str:
+            freq = Counter(url_str)
+            prob = [float(freq[c]) / len(url_str) for c in freq]
+            features['entropy'] = -sum([p * math.log(p) / math.log(2.0) for p in prob])
+        else:
+            features['entropy'] = 0
+        
+        # 11. Consecutive characters
+        features['consecutive_digits'] = max(len(match) for match in re.findall(r'\d+', url_str)) if re.findall(r'\d+', url_str) else 0
+        features['consecutive_chars'] = max(len(match) for match in re.findall(r'[a-z]+', url_str)) if re.findall(r'[a-z]+', url_str) else 0
+        
+        return features
+    
+    def transform(self, urls):
+        features_list = []
+        for url in urls:
+            features = self.extract_features(url)
+            features_list.append(list(features.values()))
+        
+        feature_names = list(self.extract_features("https://example.com").keys())
+        return pd.DataFrame(features_list, columns=feature_names)
+
+# ========================
+# INITIALIZE NLTK COMPONENTS
+# ========================
+try:
+    tokenizer_nltk = RegexpTokenizer(r"[A-Za-z]+")
+    stemmer = SnowballStemmer("english")
+    stop_words = set(stopwords.words("english"))
+    print("✅ NLTK components initialized successfully")
+except Exception as e:
+    print(f"⚠️ Error initializing NLTK: {e}")
+    tokenizer_nltk = RegexpTokenizer(r"[A-Za-z]+")
+    stemmer = SnowballStemmer("english")
+    stop_words = set()
+
+# ========================
+# MAIN DETECTOR CLASS
+# ========================
+class PhishingURLDetectorUI:
+    def __init__(self):
+        self.models_loaded = False
+        self.loaded_models = {}
+        self.model_accuracies = {
+            'Logistic Regression': 0.9960,
+            'Naive Bayes': 0.9890,
+            'Random Forest': 0.9963,
+            'Gradient Boosting': 0.9977,
+            'CNN': 0.99805,
+            'LSTM': 0.99785,
+            'GRU': 0.99765,
+            'Hybrid CNN-RNN': 0.99800,
+            'Ensemble': 0.99805
+        }
+        self.model_names_map = {
+            'lr': 'Logistic Regression',
+            'rf': 'Random Forest',
+            'gb': 'Gradient Boosting',
+            'nb': 'Naive Bayes',
+            'cnn': 'CNN',
+            'lstm': 'LSTM',
+            'gru': 'GRU',
+            'hybrid': 'Hybrid CNN-RNN'
+        }
+        
+    def load_models(self):
+        """Load all saved models from root directory"""
+        try:
+            print("📁 Looking for model files in root directory...")
+            
+            files = os.listdir('.')
+            print(f"📋 Found {len(files)} files in directory")
+            
+            found_models = []
+            
+            # Load pickle models
+            pickle_files = [
+                ('phishing_tfidf_vectorizer.pkl', 'tfidf_vectorizer'),
+                ('phishing_feature_extractor.pkl', 'feature_extractor'),
+                ('phishing_keras_tokenizer.pkl', 'keras_tokenizer'),
+                ('phishing_lr_model.pkl', 'lr_model'),
+                ('phishing_nb_model.pkl', 'nb_model'),
+                ('phishing_rf_model.pkl', 'rf_model'),
+                ('phishing_gb_model.pkl', 'gb_model')
+            ]
+            
+            for file_name, model_name in pickle_files:
+                if file_name in files:
+                    try:
+                        with open(file_name, 'rb') as f:
+                            setattr(self, model_name, pickle.load(f))
+                            self.loaded_models[model_name] = True
+                            found_models.append(file_name)
+                            print(f"✅ Loaded {file_name}")
+                    except Exception as e:
+                        print(f"⚠️ Error loading {file_name}: {str(e)[:100]}")
+            
+            # Load keras models
+            keras_files = [
+                ('best_cnn_model.keras', 'cnn_model'),
+                ('best_lstm_model.keras', 'lstm_model'),
+                ('best_gru_model.keras', 'gru_model'),
+                ('best_hybrid_model.keras', 'hybrid_model'),
+                ('phishing_cnn_model.keras', 'cnn_model'),
+                ('phishing_lstm_model.keras', 'lstm_model'),
+                ('phishing_gru_model.keras', 'gru_model'),
+                ('phishing_hybrid_model.keras', 'hybrid_model')
+            ]
+            
+            loaded_keras = set()
+            for file_name, model_name in keras_files:
+                if file_name in files and model_name not in loaded_keras:
+                    try:
+                        setattr(self, model_name, tf.keras.models.load_model(file_name))
+                        self.loaded_models[model_name] = True
+                        loaded_keras.add(model_name)
+                        found_models.append(file_name)
+                        print(f"✅ Loaded {file_name} as {model_name}")
+                    except Exception as e:
+                        print(f"⚠️ Error loading {file_name}: {str(e)[:100]}")
+            
+            if len(found_models) == 0:
+                return "⚠️ No model files found in current directory."
+            
+            essential_models = ['feature_extractor', 'tfidf_vectorizer', 'keras_tokenizer']
+            missing = [m for m in essential_models if m not in self.loaded_models]
+            
+            if missing:
+                print(f"⚠️ Missing essential models: {missing}")
+            
+            self.models_loaded = True
+            return f"✅ Successfully loaded {len(found_models)} model files!"
+            
+        except Exception as e:
+            return f"❌ Error loading models: {str(e)}"
+    
+    def preprocess_url(self, url):
+        """Preprocess URL text"""
+        url_str = str(url).lower()
+        try:
+            tokens = tokenizer_nltk.tokenize(url_str)
+            tokens = [stemmer.stem(t) for t in tokens if t not in stop_words and len(t) > 2]
+        except:
+            tokens = re.findall(r'[a-z]+', url_str)
+            tokens = [t for t in tokens if len(t) > 2]
+        return " ".join(tokens)
+    
+    def predict_single_model(self, url, model_type):
+        """Predict using a single model"""
+        if not self.models_loaded:
+            return None, None, None
+        
+        try:
+            if 'feature_extractor' not in self.loaded_models or 'tfidf_vectorizer' not in self.loaded_models:
+                return None, None, None
+            
+            handcrafted_features = self.feature_extractor.transform([url])
+            features_dict = self.feature_extractor.extract_features(url)
+            
+            processed_url = self.preprocess_url(url)
+            tfidf_features = self.tfidf_vectorizer.transform([processed_url])
+            
+            if model_type in ['lr', 'rf', 'gb']:
+                model_attr = f'{model_type}_model'
+                if model_attr not in self.loaded_models:
+                    return None, None, None
+                
+                features_combined = hstack([tfidf_features, handcrafted_features.values])
+                model = getattr(self, model_attr)
+                proba = model.predict_proba(features_combined)[0][1]
+                prediction = 1 if proba > 0.5 else 0
+                
+            elif model_type == 'nb':
+                if 'nb_model' not in self.loaded_models:
+                    return None, None, None
+                
+                proba = self.nb_model.predict_proba(tfidf_features)[0][1]
+                prediction = 1 if proba > 0.5 else 0
+                
+            elif model_type in ['cnn', 'lstm', 'gru', 'hybrid']:
+                model_attr = f'{model_type}_model'
+                if model_attr not in self.loaded_models or 'keras_tokenizer' not in self.loaded_models:
+                    return None, None, None
+                
+                seq = self.keras_tokenizer.texts_to_sequences([url])
+                padded = pad_sequences(seq, maxlen=200, padding='post')
+                model = getattr(self, model_attr)
+                proba = model.predict(padded, verbose=0)[0][0]
+                prediction = 1 if proba > 0.5 else 0
+            else:
+                return None, None, None
+            
+            return prediction, float(proba), features_dict
+            
+        except Exception as e:
+            print(f"Error in prediction for {model_type}: {e}")
+            return None, None, None
+    
+    def predict_ensemble(self, url):
+        """Predict using ensemble of all models"""
+        if not self.models_loaded:
+            return None, None, None, None
+        
+        try:
+            if 'feature_extractor' not in self.loaded_models or 'tfidf_vectorizer' not in self.loaded_models:
+                return None, None, None, None
+            
+            handcrafted_features = self.feature_extractor.transform([url])
+            features_dict = self.feature_extractor.extract_features(url)
+            
+            processed_url = self.preprocess_url(url)
+            tfidf_features = self.tfidf_vectorizer.transform([processed_url])
+            
+            all_probas = []
+            model_names = []
+            
+            features_combined = hstack([tfidf_features, handcrafted_features.values])
+            
+            ml_models = ['lr', 'rf', 'gb']
+            for model_name in ml_models:
+                if f'{model_name}_model' in self.loaded_models:
+                    model = getattr(self, f'{model_name}_model')
+                    proba = model.predict_proba(features_combined)[0][1]
+                    all_probas.append(float(proba))
+                    model_names.append(model_name)
+            
+            if 'nb_model' in self.loaded_models:
+                nb_proba = self.nb_model.predict_proba(tfidf_features)[0][1]
+                all_probas.append(float(nb_proba))
+                model_names.append('nb')
+            
+            if 'keras_tokenizer' in self.loaded_models:
+                seq = self.keras_tokenizer.texts_to_sequences([url])
+                padded = pad_sequences(seq, maxlen=200, padding='post')
+                
+                dl_models = ['cnn', 'lstm', 'gru', 'hybrid']
+                for model_name in dl_models:
+                    if f'{model_name}_model' in self.loaded_models:
+                        model = getattr(self, f'{model_name}_model')
+                        dl_proba = model.predict(padded, verbose=0)[0][0]
+                        all_probas.append(float(dl_proba))
+                        model_names.append(model_name)
+            
+            if not all_probas:
+                return None, None, None, None
+            
+            ensemble_proba = np.mean(all_probas)
+            prediction = 1 if ensemble_proba > 0.5 else 0
+            
+            model_scores = {}
+            for i, name in enumerate(model_names):
+                model_scores[name] = all_probas[i]
+            
+            return prediction, ensemble_proba, features_dict, model_scores
+            
+        except Exception as e:
+            print(f"Error in ensemble prediction: {e}")
+            return None, None, None, None
+    
+    def create_prediction_plot(self, phishing_prob, legitimate_prob):
+        """Create a bar plot for prediction probabilities"""
+        fig, ax = plt.subplots(figsize=(8, 5))
+        
+        categories = ['Phishing', 'Legitimate']
+        probabilities = [phishing_prob * 100, legitimate_prob * 100]
+        colors = ['#ff6b6b', '#51cf66']
+        
+        bars = ax.bar(categories, probabilities, color=colors, edgecolor='black', linewidth=2)
+        
+        for bar, prob in zip(bars, probabilities):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height + 1,
+                   f'{prob:.1f}%', ha='center', va='bottom', fontsize=12, fontweight='bold')
+        
+        ax.set_ylabel('Probability (%)', fontsize=12, fontweight='bold')
+        ax.set_title('URL Classification Results', fontsize=14, fontweight='bold', pad=20)
+        ax.set_ylim(0, 105)
+        ax.grid(axis='y', alpha=0.3, linestyle='--')
+        
+        plt.tight_layout()
+        return fig
+    
+    def create_model_accuracy_chart(self):
+        """Create a bar chart showing model accuracies"""
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        models = list(self.model_accuracies.keys())
+        accuracies = [self.model_accuracies[m] * 100 for m in models]
+        
+        colors = cm.viridis(np.linspace(0.3, 0.9, len(models)))
+        
+        bars = ax.barh(models, accuracies, color=colors, edgecolor='black', linewidth=1)
+        
+        for bar, acc in zip(bars, accuracies):
+            width = bar.get_width()
+            ax.text(width + 0.5, bar.get_y() + bar.get_height()/2,
+                   f'{acc:.2f}%', va='center', fontsize=10, fontweight='bold')
+        
+        ax.set_xlabel('Accuracy (%)', fontsize=12, fontweight='bold')
+        ax.set_title('Model Performance Comparison', fontsize=14, fontweight='bold', pad=20)
+        ax.set_xlim(0, 105)
+        ax.grid(axis='x', alpha=0.3, linestyle='--')
+        
+        plt.tight_layout()
+        return fig
+    
+    def create_model_scores_chart(self, model_scores):
+        """Create a bar chart for individual model scores"""
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        full_names = [self.model_names_map.get(m, m) for m in model_scores.keys()]
+        scores = [v * 100 for v in model_scores.values()]
+        
+        colors = ['#ff6b6b' if score > 50 else '#51cf66' for score in scores]
+        
+        bars = ax.barh(full_names, scores, color=colors, edgecolor='black', linewidth=1)
+        
+        for bar, score in zip(bars, scores):
+            width = bar.get_width()
+            ax.text(width + 0.5, bar.get_y() + bar.get_height()/2,
+                   f'{score:.1f}%', va='center', fontsize=10, fontweight='bold')
+        
+        ax.set_xlabel('Phishing Probability (%)', fontsize=12, fontweight='bold')
+        ax.set_title('Individual Model Predictions', fontsize=14, fontweight='bold', pad=20)
+        ax.set_xlim(0, 105)
+        ax.grid(axis='x', alpha=0.3, linestyle='--')
+        
+        ax.axvline(x=50, color='black', linestyle='--', alpha=0.5, linewidth=2)
+        ax.text(50, len(full_names) - 0.5, 'Decision Threshold (50%)', 
+                rotation=90, va='bottom', ha='right', backgroundcolor='white')
+        
+        plt.tight_layout()
+        return fig
+    
+    def analyze_url(self, url, model_choice):
+        """Main analysis function for Gradio"""
+        if not url or url.strip() == "":
+            return "Please enter a URL to analyze.", None, None, None, None, None
+        
+        if not self.models_loaded:
+            load_status = self.load_models()
+            if "Error" in load_status or "⚠️" in load_status:
+                return load_status, None, None, None, None, None
+        
+        try:
+            print(f"\n📊 Analyzing URL: {url}")
+            print(f"🤖 Using model: {model_choice}")
+            
+            if model_choice == "Ensemble (All Models)":
+                prediction, proba, features, model_scores = self.predict_ensemble(url)
+            else:
+                model_map = {
+                    "Logistic Regression": "lr",
+                    "Naive Bayes": "nb",
+                    "Random Forest": "rf",
+                    "Gradient Boosting": "gb",
+                    "CNN": "cnn",
+                    "LSTM": "lstm",
+                    "GRU": "gru",
+                    "Hybrid CNN-RNN": "hybrid"
+                }
+                model_type = model_map.get(model_choice, "lr")
+                prediction, proba, features = self.predict_single_model(url, model_type)
+                model_scores = None
+            
+            if prediction is None:
+                return self.demo_prediction(url, model_choice), None, None, None, None, "⚠️ Using demo mode"
+            
+            phishing_prob = proba if prediction == 1 else 1 - proba
+            legitimate_prob = 1 - phishing_prob
+            
+            result_text = f"## 🔍 Analysis Results\n\n"
+            result_text += f"**URL:** `{url}`\n\n"
+            result_text += f"**Model Used:** {model_choice}\n\n"
+            
+            if prediction == 1:
+                result_text += f"**Prediction:** 🔴 **PHISHING** (High Risk)\n"
+                result_text += f"**Confidence:** {phishing_prob*100:.2f}%\n"
+            else:
+                result_text += f"**Prediction:** 🟢 **LEGITIMATE** (Safe)\n"
+                result_text += f"**Confidence:** {legitimate_prob*100:.2f}%\n"
+            
+            if features:
+                result_text += f"\n**Key Features:**\n"
+                result_text += f"• URL Length: {features.get('url_length', 0)}\n"
+                result_text += f"• Has HTTPS: {'✅ Yes' if features.get('has_https', 0) == 1 else '❌ No'}\n"
+                result_text += f"• Has IP Address: {'⚠️ Yes' if features.get('has_ip', 0) == 1 else '✅ No'}\n"
+                result_text += f"• Phishing Keywords: {features.get('phishing_keyword_count', 0)}\n"
+                result_text += f"• Suspicious TLD: {'⚠️ Yes' if features.get('has_suspicious_tld', 0) == 1 else '✅ No'}\n"
+                result_text += f"• URL Shortener: {'⚠️ Yes' if features.get('is_shortened', 0) == 1 else '✅ No'}\n"
+                result_text += f"• Entropy: {features.get('entropy', 0):.3f}\n"
+            
+            plot1 = self.create_prediction_plot(phishing_prob, legitimate_prob)
+            
+            if model_scores and model_choice == "Ensemble (All Models)":
+                plot2 = self.create_model_scores_chart(model_scores)
+                scores_df = pd.DataFrame({
+                    'Model': [self.model_names_map.get(m, m) for m in model_scores.keys()],
+                    'Phishing Probability': [f"{v*100:.1f}%" for v in model_scores.values()]
+                })
+                scores_table = scores_df.to_markdown(index=False)
+            else:
+                plot2 = self.create_model_accuracy_chart()
+                scores_table = ""
+            
+            metrics_df = pd.DataFrame({
+                'Metric': ['Phishing Probability', 'Legitimate Probability', 'Confidence'],
+                'Value': [f"{phishing_prob*100:.2f}%", f"{legitimate_prob*100:.2f}%", 
+                         f"{max(phishing_prob, legitimate_prob)*100:.2f}%"]
+            })
+            
+            return result_text, plot1, plot2, metrics_df.to_markdown(index=False), scores_table, "✅ Analysis Complete"
+            
+        except Exception as e:
+            print(f"Error in analyze_url: {e}")
+            return f"Error analyzing URL: {str(e)}", None, None, None, None, "❌ Analysis Failed"
+    
+    def demo_prediction(self, url, model_choice):
+        """Demo prediction when models are not available"""
+        url_lower = url.lower()
+        
+        phishing_indicators = ['login', 'verify', 'secure', 'account', 'bank', 'paypal', 'update']
+        suspicious_tlds = ['.tk', '.ml', '.ga', '.cf', '.xyz']
+        
+        score = 0
+        
+        if not url_lower.startswith('https://'):
+            score += 0.2
+        
+        if re.search(r'\d+\.\d+\.\d+\.\d+', url_lower):
+            score += 0.3
+        
+        for keyword in phishing_indicators:
+            if keyword in url_lower:
+                score += 0.1
+        
+        for tld in suspicious_tlds:
+            if tld in url_lower:
+                score += 0.2
+        
+        if len(url) > 50:
+            score += 0.1
+        
+        phishing_prob = min(score, 0.9)
+        
+        result_text = f"## 🔍 Analysis Results (DEMO MODE)\n\n"
+        result_text += f"**URL:** `{url}`\n\n"
+        result_text += f"**Model Used:** {model_choice}\n\n"
+        result_text += f"⚠️ **Note:** Running in demo mode. Models not fully loaded.\n\n"
+        
+        if phishing_prob > 0.5:
+            result_text += f"**Prediction:** 🔴 **PHISHING** (High Risk)\n"
+            result_text += f"**Demo Confidence:** {phishing_prob*100:.2f}%\n"
+        else:
+            result_text += f"**Prediction:** 🟢 **LEGITIMATE** (Safe)\n"
+            result_text += f"**Demo Confidence:** {(1-phishing_prob)*100:.2f}%\n"
+        
+        return result_text
+
+# ========================
+# CREATE GRADIO INTERFACE
+# ========================
+detector_ui = PhishingURLDetectorUI()
+
+with gr.Blocks(theme=gr.themes.Soft(), title="Phishing URL Detector") as demo:
+    gr.Markdown("""
+    # 🔗 Phishing URL Detection System
+    ### Advanced ML/DL models to detect malicious URLs with high accuracy
+    """)
+    
+    with gr.Row():
+        with gr.Column(scale=3):
+            gr.Markdown("### 📝 Enter URL to Analyze")
+            url_input = gr.Textbox(
+                label="URL",
+                placeholder="https://example.com",
+                lines=1
+            )
+            
+            gr.Markdown("### 🤖 Select Detection Model")
+            model_choice = gr.Dropdown(
+                choices=[
+                    "Ensemble (All Models)",
+                    "Logistic Regression",
+                    "Naive Bayes",
+                    "Random Forest",
+                    "Gradient Boosting",
+                    "CNN",
+                    "LSTM",
+                    "GRU",
+                    "Hybrid CNN-RNN"
+                ],
+                value="Ensemble (All Models)",
+                label="Model Selection"
+            )
+            
+            analyze_btn = gr.Button("🔍 Analyze URL", variant="primary", size="lg")
+            status_text = gr.Textbox(label="Status", interactive=False)
+        
+        with gr.Column(scale=2):
+            gr.Markdown("### 📊 Model Accuracies")
+            accuracy_plot = gr.Plot(label="Model Performance")
+    
+    with gr.Row():
+        with gr.Column():
+            gr.Markdown("### 📈 Analysis Results")
+            result_output = gr.Markdown(label="Results")
+            
+            with gr.Row():
+                with gr.Column():
+                    gr.Markdown("### 📊 Prediction Probabilities")
+                    prediction_plot = gr.Plot(label="Classification Results")
+                with gr.Column():
+                    gr.Markdown("### 📋 Detailed Metrics")
+                    metrics_table = gr.Markdown(label="Metrics")
+            
+            gr.Markdown("### 🤖 Model Predictions")
+            scores_table = gr.Markdown(label="Individual Model Scores")
+            
+        with gr.Column(scale=2):
+            gr.Markdown("### 💡 Example URLs to Test")
+            examples = gr.Examples(
+                examples=[
+                    ["https://secure-login-paypal.com/verify-account", "Ensemble (All Models)"],
+                    ["https://www.google.com", "Ensemble (All Models)"],
+                    ["https://github.com", "CNN"],
+                    ["http://192.168.1.100/login.php", "Random Forest"],
+                    ["https://www.amazon.com", "Ensemble (All Models)"],
+                    ["http://update-your-banking-info-now.xyz", "Hybrid CNN-RNN"]
+                ],
+                inputs=[url_input, model_choice],
+                label="Try these examples"
+            )
+            
+            gr.Markdown("""
+            ### ⚠️ Safety Tips
+            1. **Check HTTPS**: Always look for the padlock icon
+            2. **Verify Domain**: Check for misspellings in domain names
+            3. **Avoid Short URLs**: Be cautious of shortened URLs
+            4. **Check for IPs**: URLs with IP addresses are suspicious
+            5. **Look for Keywords**: Phishing URLs often contain 'login', 'verify', 'secure'
+            """)
+    
+    gr.Markdown("""
+    ---
+    **Phishing URL Detection System** | Using Advanced Machine Learning & Deep Learning Models  
+    ⚠️ *This tool is for educational purposes. Always verify suspicious URLs through official channels.*
+    """)
+    
+    analyze_btn.click(
+        fn=detector_ui.analyze_url,
+        inputs=[url_input, model_choice],
+        outputs=[result_output, prediction_plot, accuracy_plot, metrics_table, scores_table, status_text]
+    )
+    
+    def initialize():
+        return detector_ui.create_model_accuracy_chart()
+    
+    demo.load(initialize, outputs=[accuracy_plot])
+
+# ========================
+# LAUNCH THE APP
+# ========================
+print("🚀 Launching Phishing URL Detection UI...")
+print("=" * 60)
+
+load_status = detector_ui.load_models()
+print(load_status)
+
+print("\n📋 Models loaded successfully! Now launching interface...")
+print("\n🌐 Launching Gradio interface...")
+
+demo.launch(debug=True, share=True)
